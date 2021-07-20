@@ -21,21 +21,21 @@ class OptimalPathFinder:
         self.state_shape = None
         self.action_size = None
 
-        if not os.path.exists('./results'):
-            os.makedirs('./results')
-        if not os.path.exists('./results/models'):
-            os.makedirs('./results/models')
-        if not os.path.exists('./results/graphs'):
-            os.makedirs('./results/graphs')
-        if not os.path.exists('./results/maps'):
-            os.makedirs('./results/maps')
+        # if not os.path.exists('./results'):
+        #     os.makedirs('./results')
+        # if not os.path.exists('./results/models'):
+        #     os.makedirs('./results/models')
+        # if not os.path.exists('./results/graphs'):
+        #     os.makedirs('./results/graphs')
+        # if not os.path.exists('./results/maps'):
+        #     os.makedirs('./results/maps')
 
     # environment 생성 (train, get_optimal_path 함수 호출 전에 사용)
     ## data_dir: 노드&링크 데이터 디렉토리
     ## accident_api: 사고 위험지역 예측 API URL (http://10.100.20.61:{port}/link)
     ## is_train: 학습할 경우 True, 최적 경로를 예측할 경우 False로 설정
-    def load_env(self, data_dir, accident_api, is_train=False):
-        self.env = Env(data_dir=data_dir, accident_api=accident_api, is_train=is_train)
+    def load_env(self, data_dir, is_train=False):
+        self.env = Env(data_dir=data_dir, is_train=is_train)
 
         self.state_shape = self.env.get_state_shape()
         self.action_size = self.env.get_action_size()
@@ -60,9 +60,9 @@ class OptimalPathFinder:
 
         # 모델 구조 저장
         model = tf.keras.utils.plot_model(
-            self.agent.model, './results/graphs/plot_{}_model.png'.format(model_name), show_shapes=True)
+            self.agent.model, './data/results/plot_models/{}_model.png'.format(model_name), show_shapes=True)
         target_model = tf.keras.utils.plot_model(
-            self.agent.target_model, './results/graphs/plot_{}_target_model.png'.format(model_name), show_shapes=True)
+            self.agent.target_model, './data/results/plot_models/{}_target_model.png'.format(model_name), show_shapes=True)
         return model, target_model
 
     # 학습된 모델(Agent) 를 load
@@ -124,14 +124,14 @@ class OptimalPathFinder:
                     scores.append(score)
                     episodes.append(e)
                     pylab.plot(episodes, scores, 'b')
-                    pylab.savefig("./results/graphs/score_{}.png".format(model_name))
+                    pylab.savefig("./data/results/graphs/score_{}.png".format(model_name))
 
                     print('episode: {0:4d}\t\tscore: {1:.3f}\t\tmemory length: {2:4d}\t\tepsilon: {3:.3f}'.format(
                         e, score, len(self.agent.memory), self.agent.epsilon
                     ))
 
                     # 종료조건
-                    exit_num = 30
+                    exit_num = 10
                     is_exit = True
                     if len(is_goals) < exit_num:
                         is_exit = False
@@ -140,11 +140,11 @@ class OptimalPathFinder:
                             if not is_goal:
                                 is_exit = False
                                 break
-                    if is_exit and e > 200 and np.mean(scores[-min(exit_num, len(scores)):]) > 0.8:
-                        self.agent.model.save_weights("./results/models/{}.h5".format(model_name))
+                    if is_exit and e > 200 and np.mean(scores[-min(exit_num, len(scores)):]) > 0.5:
+                        self.agent.model.save_weights("./data/results/models/{}.h5".format(model_name))
                         sys.exit()
                     if e % 50 == 0:
-                        self.agent.model.save_weights("./results/models/{}_{}.h5".format(model_name, e))
+                        self.agent.model.save_weights("./data/results/models/{}_{}.h5".format(model_name, e))
         self.env = None
         self.agent = None
 
@@ -193,6 +193,39 @@ class OptimalPathFinder:
             if False:#reward == 1:
                 return self.env.history
             else:
+                def _get_cost(current_node, next_node):
+                    # if current_node == -1 or next_node == -1:
+                    #     return 99999999
+                    accident = self.env.G.edges[(current_node, next_node)]['accident']
+                    length = self.env.G.edges[(current_node, next_node)]['length']
+                    speed = self.env.G.edges[(current_node, next_node)]['speed']
+                    time = length / speed
+
+                    norm_accident = accident / 4
+                    norm_accident = norm_accident ** 2
+                    norm_length = (length - self.env.min_length) / (self.env.max_length - self.env.min_length)
+                    norm_time = (time - self.env.min_time) / (self.env.max_time - self.env.min_time)
+
+                    return norm_accident * 0.6 + norm_length * 1.2 + norm_time * 1.2
+
+                # g = 현재 노드에서 출발 지점까지의 총 cost
+                def _get_g(history):
+                    sum_cost = 0
+                    for i in range(len(history) - 1):
+                        cost = _get_cost(history[i], history[i + 1])
+                        sum_cost += cost
+                    return sum_cost
+
+                # 현재 노드에서 목적지까지의 추정 cost
+                def _get_h(current_node, goal_node):
+                    # if current_node == -1:
+                    #     return 99999999
+                    goal_dist = haversine(
+                        self.env.G.nodes[current_node]['coordinate'],
+                        self.env.G.nodes[goal_node]['coordinate'],
+                        unit = 'm')
+                    return (goal_dist - self.env.min_length) / (self.env.max_length - self.env.min_length)
+
                 optimal_history = []
                 visited = []
                 G = self.env.G
@@ -206,8 +239,12 @@ class OptimalPathFinder:
 
                 visited.append(start_node)
                 for next_node in G.neighbors(start_node):
-                    h = get_cost(current_node=start_node, next_node=next_node, goal_node=goal_node, max_dist=max_dist)
+                    # h = get_cost(current_node=start_node, next_node=next_node, goal_node=goal_node, max_dist=max_dist)
                     history = [start_node, next_node]
+
+                    g = _get_g(history)
+                    h = _get_h(next_node, self.env.goal_node)
+                    f = g + h
                     queue.put((h, history))
 
                 while True:
@@ -228,10 +265,15 @@ class OptimalPathFinder:
                     for next_node in G.neighbors(current_node):
                         if next_node in visited:
                             continue
-                        next_h = get_cost(current_node=current_node, next_node=next_node, goal_node=goal_node, max_dist=max_dist)
+                        # next_h = get_cost(current_node=current_node, next_node=next_node, goal_node=goal_node, max_dist=max_dist)
                         next_history = copy.deepcopy(history)
                         next_history.append(next_node)
-                        queue.put((h + next_h, next_history))
+                        
+                        ng = _get_g(next_history)
+                        nh = _get_h(next_node, self.env.goal_node)
+                        nf = ng + nh
+                        
+                        queue.put((nf, next_history))
                 return optimal_history
         history_1 = get_path(shuttle, passenger)
         history_2 = get_path(passenger, goal)
@@ -267,8 +309,8 @@ class OptimalPathFinder:
         # 맵 생성
         m = folium.Map(location=sejong_coord,
             zoom_start=14,
-            tiles=map_title,
-            attr='세종')
+            tiles=map_title,#'tiles/{z}/{x}/{y}.png',
+            attr='sejong')
 
         np_link_data = np.array(df_link)
         np_node_data = np.array(df_node)
@@ -298,6 +340,7 @@ class OptimalPathFinder:
             folium.PolyLine(
                 locations=np_coords_set,
                 color=li_color[G.edges[edge]['accident']],
+                popup = '{}/{}/{}'.format(int(G.edges[edge]['length']), G.edges[edge]['speed'], G.edges[edge]['accident']),
                 line_cap='round'
             ).add_to(m)
 
@@ -321,9 +364,11 @@ class OptimalPathFinder:
             np_coords_set[:,0] = np_target_link_coords_set[:,1]
             np_coords_set[:,1] = np_target_link_coords_set[:,0]
             
+            edge = (history_1[i], history_1[i + 1])
             folium.PolyLine(
                 locations=np_coords_set,
                 color=shuttle_color,
+                popup = '{}/{}/{}'.format(int(G.edges[edge]['length']), G.edges[edge]['speed'], G.edges[edge]['accident']),
                 line_cap='round',
                 dash_array='5'
             ).add_to(m)
@@ -348,9 +393,11 @@ class OptimalPathFinder:
             np_coords_set[:,0] = np_target_link_coords_set[:,1]
             np_coords_set[:,1] = np_target_link_coords_set[:,0]
             
+            edge = (history_2[i], history_2[i + 1])
             folium.PolyLine(
                 locations=np_coords_set,
                 color=goal_color,
+                popup = '{}/{}/{}'.format(int(G.edges[edge]['length']), G.edges[edge]['speed'], G.edges[edge]['accident']),
                 line_cap='round',
                 dash_array='5'
             ).add_to(m)
@@ -362,7 +409,7 @@ class OptimalPathFinder:
                     location = coords,
                         radius=3,
                         color = 'lightgreen',
-                        # popup = node,
+                        popup = node,
                         fill = True,
                         fill_color = 'lightgreen'
             ).add_to(m)
@@ -376,7 +423,9 @@ class OptimalPathFinder:
                 location = coords,
                 radius=5,
                 color = shuttle_color,
-                popup = 'Shuttle_to_Passenger_{}  <node_id: {}>'.format(i, node),
+                popup = node,
+                # popup = 'Shuttle_to_Passenger_{}  <node_id: {}>'.format(i, node),
+                # popup = '{}/{}/{}'.format(int(G.edges[edge]['length']), G.edges[edge]['speed'], G.edges[edge]['accident']),
                 fill = True,
                 fill_color = shuttle_color
             ).add_to(m)
@@ -390,7 +439,9 @@ class OptimalPathFinder:
                 location = coords,
                 radius=5,
                 color = goal_color,
-                popup = 'Passenger_to_Goal_{}  <node_id: {}>'.format(i, node),
+                popup = node,
+                # popup = 'Passenger_to_Goal_{}  <node_id: {}>'.format(i, node),
+                # popup = '{}/{}/{}'.format(int(G.edges[edge]['length']), G.edges[edge]['speed'], G.edges[edge]['accident']),
                 fill = True,
                 fill_color = goal_color
             ).add_to(m)
@@ -428,6 +479,85 @@ class OptimalPathFinder:
             fill_color = goal_color
         ).add_to(m)
             
-        m.save(os.path.join('./results/maps', '{}_{}.html'.format(model_name, map_type)))
+        m.save(os.path.join('./data/results/maps', '{}.html'.format(model_name)))#, map_type)))
+
+        return m
+
+    def test_render(self, data_dir):
+        G = self.env.G
+        sejong_coord = [36.4831117, 127.2920639]
+
+        # Map 종류 Base, gray, midnight, Hybrid, Satellite
+        map_real_image = 'http://api.vworld.kr/req/wmts/1.0.0/D62FBAB1-07EC-3CC5-8F48-033735C2BF9A/Satellite/{z}/{y}/{x}.jpeg'
+        map_2D_image = 'http://api.vworld.kr/req/wmts/1.0.0/D62FBAB1-07EC-3CC5-8F48-033735C2BF9A/midnight/{z}/{y}/{x}.png'
+
+        if map_type == "REAL" :
+            map_title = map_real_image
+        else :
+            map_title = map_2D_image
+
+        li_color = ["lightgreen", "green", "yellow", "orange", "red"]
+        shuttle_color = 'purple'
+        passenger_color = 'cyan'
+        goal_color = 'blue'
+
+        # data load
+        np_link_vertex = np.load(os.path.join(data_dir, 'LINK_VERTEX.npy'))[:,:4]
+        
+        df_link = pd.DataFrame(np.load(os.path.join(data_dir, 'link.npy')))
+        df_link.columns = np.load(os.path.join(data_dir, 'LINK_COLUMNS.npy'))
+
+        df_node = pd.DataFrame(np.load(os.path.join(data_dir, 'node.npy')))
+        df_node.columns = np.load(os.path.join(data_dir, 'NODE_COLUMNS.npy'))
+
+        # 맵 생성
+        m = folium.Map(location=sejong_coord,
+            zoom_start=14,
+            tiles=map_title,#'tiles/{z}/{x}/{y}.png',
+            attr='sejong_test')
+
+        np_link_data = np.array(df_link)
+        np_node_data = np.array(df_node)
+
+        nodes = [node for node in G.nodes()]
+        edges = [G.edges[edge]['link_id'] for edge in G.edges()]
+
+        # 자율주행 구역 링크
+        for edge in G.edges():
+            # 링크 좌표 탐색
+            # 링크아이디와 매칭되는 데이터구간을 좌표 데이터셋에서 탐색하여 링크 좌표 불러옴)
+
+            link_id = G.edges[edge]['link_id']
+
+            np_idx = np.where(np_link_vertex[:,0]==link_id)[0]
+
+            min_idx = np_idx.min()
+            max_idx = np_idx.max()
+            
+            np_target_link_coords_set = np_link_vertex[min_idx:max_idx+1,2:4]
+            
+            np_coords_set = np.zeros((len(np_target_link_coords_set),2))
+
+            np_coords_set[:,0] = np_target_link_coords_set[:,1]
+            np_coords_set[:,1] = np_target_link_coords_set[:,0]
+            
+            folium.PolyLine(
+                locations=np_coords_set,
+                color=li_color[G.edges[edge]['accident']],
+                popup = '{}/{}/{}'.format(int(G.edges[edge]['length']), G.edges[edge]['speed'], G.edges[edge]['accident']),
+                line_cap='round'
+            ).add_to(m)
+
+        # 노드
+        for node in nodes:
+            coords = [G.nodes[node]['coordinate'][1], G.nodes[node]['coordinate'][0]]
+            folium.CircleMarker(
+                    location = coords,
+                        radius=3,
+                        color = 'lightgreen',
+                        popup = node,
+                        fill = True,
+                        fill_color = 'lightgreen'
+            ).add_to(m)
 
         return m

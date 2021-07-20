@@ -51,7 +51,7 @@ class DQNAgent:
 
         if self.load_model:
             import os
-            model_path = "./results/models/{}.h5".format(model_name)
+            model_path = "./data/results/models/{}.h5".format(model_name)
             if os.path.exists(model_path):
                 self.model.load_weights(model_path)
             else:
@@ -92,9 +92,6 @@ class DQNAgent:
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
         
-#         if self.epsilon2 > self.epsilon2_min:
-#             self.epsilon2 *= self.epsilon2_decay
-
         # 메모리에서 배치 크기만큼 무작위로 샘플 추출
         mini_batch = random.sample(self.memory, self.batch_size)
 

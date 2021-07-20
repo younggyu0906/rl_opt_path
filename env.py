@@ -12,45 +12,49 @@ import pandas as pd
 import networkx as nx
 from haversine import haversine
 
+from graph_builder import GraphBuilder
+
 
 class Env:
-    def __init__(self, data_dir, accident_api=None, is_train=False):
-        self.stop_nodes = [
-            4130022800, 4130026600, 4130023200, 4130023000, 4130026500, 4130022900, 4130105600, 4130109800
-        ]
-        self.stop_links = [
-            4130191300, 4130191400, 4130148300, 4130148400, 4130126900, 4130126300, 
-        ]
+    def __init__(self, data_dir, is_train=False):
         self._DEBUG = False
 
-        self.data_dir = data_dir
-        self.accident_api = accident_api
-
         self.is_train = is_train
-
-        self.G = self._create_graph()
-        
         if self.is_train:
-            random.seed(time.time())
+            seed = time.time()
+            self.is_random = True
         else:
-            random.seed(12345)
+            seed = 12345
+            self.is_random = False
+
+#         ### TEST ########################
+#         self.is_random = True
+#         #################################
+
+        self.gb = GraphBuilder(data_dir=data_dir, seed=seed)#, accident_api=accident_api)
+        self.G = self.gb.build_graph()
         
+        self.G = self.gb.set_accident(self.G, is_random=self.is_random)
+        self.G = self.gb.set_speed(self.G, is_random=self.is_random)
+
+        # random.seed(seed)
+
         self.max_num_neighbors = self._get_max_num_neighbors()
-        self.num_features = 2
-        self.max_search_depth = 5
-        
-        self._set_accident()
+        self.num_features = 5       # accident, time, length, start_to_current, current_to_goal
+        self.max_search_depth = 10
         
         self.neighbor_map = None
 
+        self.max_dist = 7435
+        self.max_length = self.get_max_length()
+        self.min_length = self.get_min_length()
+        self.max_time = self.get_max_time()
+        self.min_time = self.get_min_time()
+        
         self.prev_node = None
         self.current_node = None
-        
         self.start_node = None
         self.goal_node = None
-
-        self.max_dist = 0
-        
         self.num_step = 0
         self.num_episode = 0
         self.history = []
@@ -61,68 +65,41 @@ class Env:
     def get_action_size(self):
         return self.max_num_neighbors
 
-    def _create_graph(self):
-        df_sejong_nodes = pd.read_csv(
-            os.path.join(self.data_dir, 'AUTO_AREA_NODE.csv'), encoding='cp949')
+    def get_max_length(self):
+        max_length = 0
+        for edge in self.G.edges():
+            length = self.G.edges[edge]['length']
+            if length > max_length:
+                max_length = length
+        return max_length
 
-        sejong_node_ids = df_sejong_nodes['NODE_ID'].to_list()
+    def get_min_length(self):
+        min_length = 999999999999
+        for edge in self.G.edges():
+            length = self.G.edges[edge]['length']
+            if length < min_length:
+                min_length = length
+        return min_length
+                
+    def get_max_time(self):
+        max_time = 0
+        for edge in self.G.edges():
+            length = self.G.edges[edge]['length']
+            speed = self.G.edges[edge]['speed']
+            time = length / speed
+            if time > max_time:
+                max_time = time
+        return max_time
 
-        np_link_info = np.load(os.path.join(self.data_dir, 'LINK_INFO.npy'))
-        df_link = pd.DataFrame(np_link_info)
-        df_link.columns = [
-            "LINK_ID", "F_NODE", "T_NODE", "LANES",
-            "ROAD_RANK", "ROAD_TYPE", "ROAD_NO", "ROAD_NAME",
-            "ROAD_USE", "MULTI_LINK", "CONNECT", "MAX_SPD",
-            "REST_VEH", "REST_W", "REST_H", "LENGTH",
-            "VERTEX_CNT", "REMARK"
-        ]
-
-        np_node_info = np.load(os.path.join(self.data_dir, 'NODE_INFO.npy'))
-        df_node_info = pd.DataFrame(np_node_info)
-        df_node_info.columns = [
-            "NODE_ID","NODE_TYPE","NODE_NAME","TURN_P","REMARK"
-        ]
-        np_node_GIS = np.load(os.path.join(self.data_dir, 'NODE_GIS.npy'))
-        df_node_GIS = pd.DataFrame(np_node_GIS)
-        df_node_GIS.columns = ["NODE_ID","LONGITUDE","LATITUDE","ELEVATION"]
-        df_node = pd.concat((df_node_info,df_node_GIS[["LONGITUDE","LATITUDE","ELEVATION"]]), axis=1)
-
-        G = nx.DiGraph()
-
-        # node
-        for (i, row) in df_node.iterrows():
-            if int(row['NODE_ID']) in sejong_node_ids:
-                if int(row['NODE_ID']) in self.stop_nodes:
-                    continue
-                G.add_node(int(row['NODE_ID']), coordinate=(row['LONGITUDE'], row['LATITUDE']))
-
-        # link
-        for (i, row) in df_link.iterrows():
-            if int(row['F_NODE']) in G.nodes() and int(row['T_NODE']) in G.nodes():
-                if int(row['LINK_ID']) in self.stop_links:
-                    continue
-                G.add_edge(
-                    int(row['F_NODE']), int(row['T_NODE']),
-                    link_id=int(row['LINK_ID']),
-                    max_spd=row['MAX_SPD'],
-                    length=row['LENGTH']
-                )
-        
-        num_nodes = len(G.nodes())
-        while True:
-            node_list = list(G.nodes())
-            for node in node_list:
-                if len([n for n in G.neighbors(node)]) < 2:
-                    G.remove_node(node)
-            if len(G.nodes()) == num_nodes:
-                break
-            num_nodes = len(G.nodes())
-        
-        if self._DEBUG:
-            print('nodes: ', len(G.nodes()))
-            print('edges: ', len(G.edges()))
-        
-        return G
+    def get_min_time(self):
+        min_time = 999999999999
+        for edge in self.G.edges():
+            length = self.G.edges[edge]['length']
+            speed = self.G.edges[edge]['speed']
+            time = length / speed
+            if time < min_time:
+                min_time = time
+        return min_time
 
     def _get_max_num_neighbors(self):
         max_num_neighbors = 0
@@ -131,49 +108,6 @@ class Env:
             if num_neighbors > max_num_neighbors:
                 max_num_neighbors = num_neighbors
         return max_num_neighbors
-    
-    def _set_accident(self):
-        if self.accident_api is None or self.is_train:
-            weights = (70, 15, 8, 4, 3)
-
-            # set accident
-            accident_ranks = [0, 1, 2, 3, 4]
-            for edge in self.G.edges():
-                self.G.edges[edge]['accident'] = random.choices(accident_ranks, weights=weights)[0]
-        else:
-#             params = {
-#                 'locationName': '세종',
-#                 'numOfRows': 100,
-#                 'pageNo': 1,
-#                 'dataType': 'JSON',
-#                 'details': 'TRUE',
-#                 'startX': 127.2575497,      # 127.12,
-#                 'endX': 127.3446409,        # 127.4,
-#                 'startY': 36.4603768,       # 36.4,
-#                 'endY': 36.5116487,         # 36.45,
-#                 'vertex': 'TRUE'
-#             }
-#             accident_ranks = [0, 1, 2, 3, 4]
-            
-#             response = requests.get(self.accident_api, params=params, timeout=10)
-#             acc_link_map = response.json()
-
-            import json
-            accident_ranks = [0, 1, 2, 3, 4]
-            with open(os.path.join(self.data_dir, 'acc_pred_example.json'), 'r') as f:
-                acc_link_map = json.load(f)
-
-            for edge in self.G.edges():
-                self.G.edges[edge]['accident'] = 0
-
-            edge_ids = [self.G.edges[edge]['link_id'] for edge in self.G.edges()]
-            edges = [edge for edge in self.G.edges()]
-            for item in acc_link_map['items']:
-                if item['linkId'] in edge_ids:
-                    for edge in self.G.edges():
-                        if self.G.edges[edge]['link_id'] == item['linkId']:
-                            self.G.edges[edge]['accident'] = item['rank']
-                            break
 
     def _set_neighbor_map(self):
         neighbor_map = {}
@@ -206,32 +140,32 @@ class Env:
         start_node = random.choice(nodes)
         history = [start_node]
 
-        if self.is_train:
-            # 목표노드
-            # 에피소드마다 start_node와의 거리를 증가시켜서 선택
-            curr_node = start_node
-            if self.num_episode > 100:
-                goal_node = random.choice(nodes)
-            else:
-                next_node = None
-                for i in range(self.num_episode // 20 + 1):
-                    next_node = get_next_node(curr_node, history)
-                    if next_node is None:
-                        break
-                    history.append(next_node)
-                    curr_node = next_node
-                if next_node is None:
-                    next_node = random.choice(nodes)
-                goal_node = next_node
-
-            if start_node == goal_node:
-                while start_node != goal_node:
-                    goal_node = random.choice(nodes)
-        else:
+        # if self.is_train:
+        #     # 목표노드
+        #     # 에피소드마다 start_node와의 거리를 증가시켜서 선택
+        curr_node = start_node
+        if self.num_episode > 100:
             goal_node = random.choice(nodes)
-            if start_node == goal_node:
-                while start_node != goal_node:
-                    goal_node = random.choice(nodes)
+        else:
+            next_node = None
+            for i in range(self.num_episode // 20 + 1):
+                next_node = get_next_node(curr_node, history)
+                if next_node is None:
+                    break
+                history.append(next_node)
+                curr_node = next_node
+            if next_node is None:
+                next_node = random.choice(nodes)
+            goal_node = next_node
+
+        if start_node == goal_node:
+            while start_node != goal_node:
+                goal_node = random.choice(nodes)
+        # else:
+        #     goal_node = random.choice(nodes)
+        #     if start_node == goal_node:
+        #         while start_node != goal_node:
+        #             goal_node = random.choice(nodes)
         
         self.start_node = start_node
         self.goal_node = goal_node
@@ -245,23 +179,60 @@ class Env:
                 neighbor[i] = -1
         return neighbor
 
+    def _get_cost(self, current_node, next_node):
+        # if current_node == -1 or next_node == -1:
+        #     return 99999999
+        accident = self.G.edges[(current_node, next_node)]['accident']
+        length = self.G.edges[(current_node, next_node)]['length']
+        speed = self.G.edges[(current_node, next_node)]['speed']
+        time = length / speed
 
+        norm_accident = accident / 4
+        norm_accident = norm_accident ** 2
+        norm_length = (length - self.min_length) / (self.max_length - self.min_length)
+        norm_time = (time - self.min_time) / (self.max_time - self.min_time)
+
+        return norm_accident * 0.6 + norm_length * 1.2 + norm_time * 1.2
+
+    # g = 현재 노드에서 출발 지점까지의 총 cost
+    def _get_g(self, history):
+        sum_cost = 0
+        for i in range(len(history) - 1):
+            cost = self._get_cost(history[i], history[i + 1])
+            sum_cost += cost
+        return sum_cost
+
+    # 현재 노드에서 목적지까지의 추정 cost
+    def _get_h(self, current_node, goal_node):
+        # if current_node == -1:
+        #     return 99999999
+        goal_dist = haversine(
+            self.G.nodes[current_node]['coordinate'],
+            self.G.nodes[goal_node]['coordinate'],
+            unit = 'm')
+        return (goal_dist - self.min_length) / (self.max_length - self.min_length)
+
+    # accident, time, length, start_to_current, current_to_goal
     def _get_state(self, current_node):
-        def get_feature(current_node, next_node):
+        def get_feature(current_node, next_node, history):
             if current_node == -1 or next_node == -1:
-                return [2, 2]
+                return [2 for _ in range(self.num_features)]
             else:
-                # 다음 노드에서 목표 노드까지의 직선 거리
-                _dist = haversine(
-                    self.G.nodes[next_node]['coordinate'],
-                    self.G.nodes[self.goal_node]['coordinate'],
-                    unit = 'm')
-
-                _norm_dist = _dist / self.max_dist
-                _norm_dist = _norm_dist if _norm_dist < 2 else 2
-                
                 _norm_acc = self.G.edges[(current_node, next_node)]['accident'] / 4
-                return [_norm_dist, _norm_acc]
+
+                length = self.G.edges[(current_node, next_node)]['length']
+                speed = self.G.edges[(current_node, next_node)]['speed']
+                time = length / speed
+                _norm_time = (time - self.min_time) / (self.max_time - self.min_time)
+
+                _norm_length = (length - self.min_length) / (self.max_length - self.min_length)
+
+                g = self._get_g(history)
+                _norm_g = g / len(history)*3
+                
+                h = self._get_h(current_node, self.goal_node)
+                _norm_h = h / self.max_dist
+                return [_norm_acc, _norm_time, _norm_length, _norm_g, _norm_h]
 
         if current_node == -1:
             state = np.ones(self.get_state_shape())
@@ -269,120 +240,119 @@ class Env:
             return state
 
         # 우선순위 큐
-        search_queue = PriorityQueue()
+        queue = PriorityQueue()
         state_map = {}
-        test = {}
+        visited = copy.deepcopy(self.history)
 
         neighbor = self._get_neighbors(current_node)
         for next_node in neighbor:
             state_map[next_node] = []
-            test[next_node] = []
-            feature = get_feature(current_node, next_node)
-            search_queue.put((feature[0], (next_node, next_node, [feature], [next_node])))
+            if next_node == -1:
+                continue
+            history = copy.deepcopy(visited)
+            history.append(next_node)
 
-        history = copy.deepcopy(self.history)
+            g = self._get_g(history)
+            h = self._get_h(next_node, self.goal_node)
+            f = g + h
+
+            feature = get_feature(current_node, next_node, history[:-1])
+            queue.put((f, (next_node, [feature], history)))
+
+        # history = copy.deepcopy(self.history)
         while True:
-            if search_queue.qsize() == 0:
+            if queue.qsize() == 0:
                 break
-            item = search_queue.get()
-            value = item[0]
-            r_node_id = item[1][0]
-            c_node_id = item[1][1]
-            features = copy.deepcopy(item[1][2])
-            _test = item[1][3]
+            item = queue.get()
+            f = item[0]
+            root_node = item[1][0]
+            features = copy.deepcopy(item[1][1])
+            history = item[1][2]
+            current_node = history[-1]
 
             # 종료조건
-            if c_node_id == self.goal_node:
-                state_map[r_node_id] = features
-                test[r_node_id] = _test
-                if len(state_map[r_node_id]) < self.max_search_depth:
-                    for _ in range(self.max_search_depth - len(state_map[r_node_id])):
-                        state_map[r_node_id].append([0 for _ in range(self.num_features)])
-                        test[r_node_id].append('g')
+            if current_node == self.goal_node:
+                state_map[root_node] = features
+                if len(state_map[root_node]) < self.max_search_depth:
+                    for _ in range(self.max_search_depth - len(state_map[root_node])):
+                        state_map[root_node].append([0 for _ in range(self.num_features)])
                 break
             elif len(features) > self.max_search_depth:
                 break
 
-            if c_node_id == -1:
+            if current_node == -1:
                 continue
-            if len(state_map[r_node_id]) == len(features):
-                if value < sum([sum(f) for f in state_map[r_node_id]]):
-                    continue
-            # update state map
-            state_map[r_node_id] = features
-            test[r_node_id] = _test
-            
-            # 방문 노드를 history에 append
-            history.append(c_node_id)
+
+            state_map[root_node] = features
+
+            visited.append(current_node)
+
             # 다음 방문 가능 노드를 우선순위 큐에 삽입
-            next_neighbor = self._get_neighbors(c_node_id, history)
+            next_neighbor = self._get_neighbors(current_node, visited)
             for next_node in next_neighbor:
+                if next_node in visited or next_node == -1:
+                    continue
+                next_history = copy.deepcopy(history)
+                next_history.append(next_node)
+
+                ng = self._get_g(next_history)
+                nh = self._get_h(next_node, self.goal_node)
+                nf = ng + nh
+
+                n_feature = get_feature(current_node, next_node, next_history[:-1])
                 n_features = copy.deepcopy(features)
-                n_test = copy.deepcopy(_test)
-                n_feature = get_feature(c_node_id, next_node)
-                n_value = value + n_feature[0]
                 n_features.append(n_feature)
-                n_test.append(next_node)
-                search_queue.put((n_value, (r_node_id, next_node, n_features, n_test)))
+
+                queue.put((nf, (root_node, n_features, next_history)))
 
         for key in state_map:
             if len(state_map[key]) < self.max_search_depth:
                 for _ in range(self.max_search_depth - len(state_map[key])):
-                    state_map[key].append([1 for _ in range(self.num_features)])
-
-                for _ in range(self.max_search_depth - len(test[key])):
-                    test[key].append('p')
+                    state_map[key].append([2 for _ in range(self.num_features)])
 
         state = []
-        test_state = []
         for i in range(self.max_search_depth):
             tmp = []
-            tmp_test = []
             for key in neighbor:
                 tmp.extend(state_map[key][i])
-                tmp_test.append(test[key][i])
             state.append(tmp)
-            test_state.append(tmp_test)
             
         state = np.array(state)
-        test_state = np.array(test_state)
         return state
 
     def _reward(self, action):
         neigebor = self._get_neighbors(self.current_node)
         next_node = neigebor[action]
-        a = self.G.edges[(self.current_node, next_node)]['accident'] / 4
-        reward = a * a / 2
-        return -reward
+
+        accident = self.G.edges[(self.current_node, next_node)]['accident']
+        length = self.G.edges[(self.current_node, next_node)]['length']
+        speed = self.G.edges[(self.current_node, next_node)]['speed']
+        time = length / speed
+
+        norm_accident = accident / 4
+        norm_accident = norm_accident# ** 2
+        norm_length = (length - self.min_length) / (self.max_length - self.min_length)
+        norm_time = (time - self.min_time) / (self.max_time - self.min_time)
+
+        h = self._get_h(next_node, self.goal_node)
+        _norm_h = h / self.max_dist
+
+        return -((norm_accident * 0.8 + norm_length * 1.2 + norm_time * 1.2) / 3 + _norm_h)/2
 
     def reset(self, start_node=None, goal_node=None):
         if self.is_train:
-            self._set_accident()
+            self.G = self.gb.set_accident(self.G, is_random=self.is_random)
+            self.G = self.gb.set_speed(self.G, is_random=self.is_random)
+            self.max_time = self.get_max_time()
+            self.min_time = self.get_min_time()
         
         if start_node is not None and goal_node is not None:
             self.start_node = start_node
             self.goal_node = goal_node
         else:
-            is_setting = False
-            while True:
-                if is_setting:
-                    break
-                try:
-                    self._set_start_goal_node()
-                    is_setting = True
-                except KeyError:
-                    self.key_error.append(str(KeyError))
-            
+            self._set_start_goal_node()
 
         self.neighbor_map = self._set_neighbor_map()
-
-        # max_dist 초기화
-        self.max_dist = haversine(
-            self.G.nodes[self.start_node]['coordinate'],
-            self.G.nodes[self.goal_node]['coordinate'],
-            unit = 'm')
-        if self.max_dist == 0:
-            self.max_dist = 1
 
         self.history = [self.start_node]
         self.prev_node = None
@@ -403,15 +373,15 @@ class Env:
                 if self._DEBUG:
                     print('[ENV] MAX STEP.. {}'.format(self.num_step))
             else:
-                done = False if self.is_train else True
+                done = False# if self.is_train else True
                 if self._DEBUG:
                     print('[ENV] DUMMY NODE..')
-            reward = -2
+            reward = -4
             # self.prev_node = self.current_node
             # self.current_node = next_node
             
         elif next_node == self.goal_node:
-            reward = 1
+            reward = 2
             self.prev_node = self.current_node
             self.current_node = next_node
             done = True
@@ -434,14 +404,15 @@ class Env:
                 tmp = True
                 break
         if not tmp:
-            reward = -2
+            reward = -4
             self.prev_node = self.current_node
             self.current_node = next_node
             done = True
             if self._DEBUG:
                 print('[ENV] DUMMY NODE..!!!')
         
-        self.history.append(self.current_node)
+        if self.current_node not in self.history:
+            self.history.append(self.current_node)
         state = self._get_state(self.current_node)
         self.num_step += 1
         return state, reward, done
